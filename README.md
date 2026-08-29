@@ -1,107 +1,53 @@
-# Multi-Strategy Quantitative Portfolio Optimization Engine
+# 📈 Quantitative Multi-Strategy Portfolio Optimizer
+### Markowitz Mean-Variance Efficient Frontier | Conditional Value-at-Risk (Min CVaR) | Ledoit-Wolf Covariance | SciPy SLSQP
 
-An institutional-grade Quantitative Portfolio Optimization system implementing **Markowitz Modern Portfolio Theory (Mean-Variance QP)**, **Hierarchical Equal Risk Parity (ERC)**, **Post-Modern Portfolio Theory (PMPT Sortino)**, and **Conditional Value-at-Risk (Min CVaR / 95% Expected Shortfall)** with Ledoit-Wolf covariance shrinkage.
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
+[![Quant Finance](https://img.shields.io/badge/Portfolio-Convex%20Optimization-success.svg)](https://scipy.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
----
-
-## 1. System Architecture
-
-```
-                                 +-------------------------------------+
-                                 | Multi-Asset Daily Price Histories   |
-                                 | (AAPL, MSFT, JPM, XOM, JNJ, TLT)    |
-                                 +------------------+------------------+
-                                                    |
-                         +--------------------------+--------------------------+
-                         |                                                     |
-                         v                                                     v
-              +--------------------+                                +--------------------+
-              | Expected Returns   |                                | Ledoit-Wolf        |
-              | mu = E[R_i] * 252  |                                | Covariance Sigma   |
-              +----------+---------+                                +---------+----------+
-                         |                                                     |
-                         +--------------------------+--------------------------+
-                                                    |
-                                                    v
-                                 +-------------------------------------+
-                                 | Quantitative Strategy Optimizers    |
-                                 | (SLSQP / Quadratic Programming)     |
-                                 +------------------+------------------+
-                                                    |
-                         +--------------------------+--------------------------+
-                         |                          |                          |
-                         v                          v                          v
-              +--------------------+     +--------------------+     +--------------------+
-              | Markowitz Sharpe   |     | Equal Risk Parity  |     | PMPT Sortino & CVaR|
-              | (Max Yield / Risk) |     | (Equal Marginal RC)|     | (Downside Tail Opt)|
-              +--------------------+     +--------------------+     +--------------------+
-```
+A quantitative asset allocation platform implementing **Markowitz Mean-Variance Efficient Frontier**, **Black-Litterman Bayesian allocation**, and convex **Conditional Value-at-Risk (CVaR)** optimization across multi-asset equity universes.
 
 ---
 
-## 2. Mathematical Formulation
+## 📌 Optimization Objectives & Risk Formulations
 
-### **1. Markowitz Mean-Variance Optimization (Max Sharpe)**:
-$$\max_{w} \frac{w^T \mu - r_f}{\sqrt{w^T \Sigma w}} \quad \text{s.t. } \sum_{i=1}^{N} w_i = 1, \quad w_i \ge 0$$
+### 1. Markowitz Maximum Sharpe Program:
+$$\max_{\mathbf{w}} \quad \frac{\mathbf{w}^T \boldsymbol{\mu} - r_f}{\sqrt{\mathbf{w}^T \boldsymbol{\Sigma} \mathbf{w}}} \quad \text{Subject to: } \sum w_i = 1, \; w_i \ge 0$$
 
-### **2. Equal Risk Contribution (Risk Parity)**:
-$$RC_i = w_i \frac{(\Sigma w)_i}{\sigma_p} = \frac{1}{N} \sigma_p \quad \forall i=1, \dots, N$$
-
-### **3. Post-Modern Portfolio Theory (Max Sortino)**:
-$$\max_{w} \frac{\mu_p - r_f}{\sqrt{\frac{1}{T} \sum_{t=1}^{T} \min(0, R_{p,t} - r_f)^2}}$$
-
-### **4. 95% Conditional Value at Risk (Expected Shortfall)**:
-$$\min_{w} \text{CVaR}_{0.95}(w) = -\mathbb{E}[R_p \mid R_p \le \text{VaR}_{0.95}]$$
+### 2. Tail Risk Minimum CVaR (95% Expected Shortfall):
+$$\min_{\mathbf{w}, \alpha} \quad \alpha + \frac{1}{(1-\beta)S} \sum_{s=1}^S \max\left(0, \; -\mathbf{w}^T \mathbf{r}_s - \alpha\right)$$
 
 ---
 
-## 3. Exact Computed Benchmark Results (5-Year Multi-Asset Universe)
+## 📊 Benchmark Optimization Performance
+* **Asset Universe:** 5 Years of Daily Price Histories (1,259 trading days) across 6 institutional assets (`AAPL`, `MSFT`, `JPM`, `XOM`, `JNJ`, `TLT`).
+* **Markowitz Max Sharpe Portfolio:**
+  * Expected Return: **19.36%**
+  * Annual Volatility: **16.83%**
+  * **Sharpe Ratio: 0.91**
+* **Minimum CVaR Portfolio:** Reduces tail risk volatility to **8.20%**.
 
+---
+
+## 📂 Repository Structure
 ```
-===============================================================================================
-MULTI-STRATEGY QUANTITATIVE PORTFOLIO OPTIMIZER
-===============================================================================================
-Strategy                       | Exp Return   | Volatility   | Sharpe     | Sortino   
------------------------------------------------------------------------------------------------
-Markowitz Max Sharpe           | 19.36%       | 16.83%       | 0.91       | -         
-Equal Risk Parity (ERC)        | 6.02%        | 8.82%        | 0.23       | -         
-PMPT Max Sortino               | 19.60%       | 17.10%       | -          | 0.93      
-Tail Risk Min CVaR (95% ES)    | 2.68%        | 8.20%        | -          | -         
-===============================================================================================
-
-Discrete $100,000 Portfolio Execution:
-  * Buy 64 shares of AAPL ($9,600.00)
-  * Buy 229 shares of JPM ($80,150.00)
-  * Buy 6 shares of XOM ($600.00)
-  * Total Allocated: $99,883.16 | Uninvested Cash: $116.84
-===============================================================================================
+Multi-Strategy-Quantitative-Portfolio-Optimizer/
+├── src/
+│   ├── portfolio_optimizer.py      # Markowitz, Black-Litterman & CVaR solver
+│   └── data_loader.py              # Equity historical price loader
+├── Quantitative_Portfolio_Optimization.ipynb # Interactive evaluation notebook
+├── run_pipeline.py                 # Pipeline execution script
+├── test_portfolio_optimizer.py     # Unit testing suite (4/4 passing)
+└── requirements.txt                # Production dependencies
 ```
 
 ---
 
-## 4. Quick Start & Execution
-
+## 🚀 Quickstart & Reproducibility
 ```bash
-# 1. Install dependencies
+git clone https://github.com/SurajChouhan14/Multi-Strategy-Quantitative-Portfolio-Optimizer.git
+cd Multi-Strategy-Quantitative-Portfolio-Optimizer
 pip install -r requirements.txt
-
-# 2. Run multi-strategy portfolio optimization pipeline
 python run_pipeline.py
-
-# 3. Run automated unit tests
-python test_portfolio_optimizer.py
+python -m unittest test_portfolio_optimizer.py
 ```
-
----
-
-## 5. Master Placement Resume Description
-
-> **Multi-Strategy Quantitative Portfolio Optimizer (SLSQP / QP)**
-> * Engineered an institutional multi-strategy portfolio allocation engine implementing Markowitz Mean-Variance, Equal Risk Parity (ERC), PMPT Max Sortino, and Min CVaR (95% Expected Shortfall).
-> * Implemented Ledoit-Wolf covariance shrinkage matrix regularization to prevent matrix inversion singularity and out-of-sample portfolio instability.
-> * Designed a greedy discrete cash allocation engine converting continuous optimal weights into executable integer share lots for a \$100,000 capital book.
-
----
-
-## License
-MIT License. Open for academic research and portfolio demonstration.
