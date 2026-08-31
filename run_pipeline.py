@@ -37,9 +37,11 @@ def main():
     log("\n[1/4] Ingesting multi-asset price histories and estimating shrinkage covariance...")
     loader = PortfolioDataLoader(data_dir=os.path.join(base_dir, "data"))
     data = loader.load_price_data()
+    cov_df = data['shrunk_covariance']
+    vol_strings = [f"{t}: {cov_df.loc[t, t]**0.5 * 100:.1f}%" for t in data['tickers']]
     log(f"      • Price History Records     : {len(data['daily_returns'])} trading days (5-year continuous series)")
     log(f"      • Institutional Assets      : {len(data['tickers'])} assets {data['tickers']}")
-    log(f"      • Annualized Base Volatility: {', '.join([f'{t}: {data["shrunk_covariance"].loc[t, t]**0.5*100:.1f}%' for t in data['tickers']])}")
+    log(f"      • Annualized Base Volatility: {', '.join(vol_strings)}")
 
     optimizer = MultiStrategyPortfolioOptimizer(data, risk_free_rate=0.04)
 
