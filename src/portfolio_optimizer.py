@@ -1,22 +1,24 @@
 """
 Multi-Strategy Quantitative Portfolio Optimization Engine.
 
-Implements 5 core quantitative portfolio allocation paradigms:
-1. Markowitz Modern Portfolio Theory (Max Sharpe Ratio via Quadratic / Non-Linear Programming)
-2. Risk Parity (Equal Marginal Risk Contribution)
-3. Post-Modern Portfolio Theory (Max Sortino Ratio with Downside Semi-Variance)
-4. Conditional Value-at-Risk (Min CVaR / Expected Shortfall Tail Risk)
-5. Discrete Capital Allocation for execution
+Implements core quantitative asset allocation paradigms:
+1. Markowitz Modern Portfolio Theory (Max Sharpe Ratio via SciPy SLSQP)
+2. Rockafellar-Uryasev (2000) Convex Conditional Value-at-Risk (Min CVaR / Expected Shortfall via SciPy HiGHS LP)
+3. Black-Litterman Bayesian Asset Allocation (Prior Equilibrium + Views Matrix Blending with Quadratic Utility)
+4. Equal Risk Contribution (Risk Parity via Marginal Risk Decomposition)
+5. Discrete Capital Allocation (Integer Share Execution)
 """
 
+import math
 import numpy as np
 import pandas as pd
-from scipy.optimize import minimize
+from scipy.optimize import minimize, linprog
 
 
 class MultiStrategyPortfolioOptimizer:
     """
-    Quantitative Portfolio Optimizer supporting Sharpe, Risk Parity, Sortino, and CVaR strategies.
+    Quantitative Portfolio Optimizer supporting Markowitz, Rockafellar-Uryasev CVaR LP,
+    Black-Litterman Bayesian asset allocation, and Risk Parity.
     """
 
     def __init__(self, data_dict, risk_free_rate=0.04):
@@ -31,7 +33,7 @@ class MultiStrategyPortfolioOptimizer:
 
     def optimize_max_sharpe(self):
         """
-        Solves Markowitz Maximum Sharpe Ratio optimization.
+        Solves Markowitz Maximum Sharpe Ratio optimization via SLSQP subject to full investment and long-only bounds.
         """
         mu = self.expected_returns.values
         cov = self.cov_matrix.values
@@ -62,9 +64,137 @@ class MultiStrategyPortfolioOptimizer:
             'sharpe_ratio': round(sharpe, 4)
         }
 
+    def optimize_convex_cvar(self, alpha=0.95):
+        """
+        Solves Rockafellar-Uryasev (2000) Convex Conditional Value-at-Risk (CVaR) minimization via SciPy HiGHS LP.
+        Formulation:
+            min_{w, zeta, u}  zeta + 1 / ((1 - alpha) * T) * sum_{t=1}^T u_t
+            s.t.  u_t >= -w^T r_t - zeta  <=>  -sum_i w_i r_{t, i} - zeta - u_t <= 0,  forall t
+                  u_t >= 0,  forall t
+                  sum_i w_i = 1
+                  w_i >= 0,  forall i
+        """
+        R = self.daily_returns.values  # (T, N)
+        T, N = R.shape
+
+        # Variables: [w_1..w_N (N), zeta (1), u_1..u_T (T)] -> Total N + 1 + T
+        num_vars = N + 1 + T
+        c = np.zeros(num_vars)
+        c[N] = 1.0  # zeta coefficient
+        c[N + 1:] = 1.0 / ((1.0 - alpha) * T)  # u_t coefficients
+
+        # Variable Bounds: w_i in [0, 1], zeta in [-inf, inf], u_t in [0, inf)
+        bounds = [(0.0, 1.0)] * N + [(None, None)] + [(0.0, None)] * T
+
+        # Inequality constraints: -w^T r_t - zeta - u_t <= 0
+        A_ub = np.zeros((T, num_vars))
+        b_ub = np.zeros(T)
+        for t in range(T):
+            A_ub[t, :N] = -R[t, :]
+            A_ub[t, N] = -1.0
+            A_ub[t, N + 1 + t] = -1.0
+
+        # Equality constraint: sum_i w_i = 1
+        A_eq = np.zeros((1, num_vars))
+        A_eq[0, :N] = 1.0
+        b_eq = np.array([1.0])
+
+        res = linprog(c=c, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq, bounds=bounds, method='highs')
+
+        if not res.success:
+            raise RuntimeError(f"HiGHS Convex CVaR LP Solver failed: {res.message}")
+
+        weights = res.x[:N]
+        zeta = float(res.x[N])
+        cvar_daily = float(res.fun)
+        cvar_annual = cvar_daily * math.sqrt(252.0)
+
+        cov = self.cov_matrix.values
+        mu = self.expected_returns.values
+        p_ret = float(np.dot(weights, mu))
+        p_vol = float(np.sqrt(np.dot(weights.T, np.dot(cov, weights))))
+
+        return {
+            'strategy': 'Rockafellar-Uryasev Convex Min CVaR (HiGHS LP)',
+            'solver_status': res.message,
+            'weights': {t: round(float(w), 4) for t, w in zip(self.tickers, weights)},
+            'expected_annual_return': round(p_ret, 4),
+            'annual_volatility': round(p_vol, 4),
+            'annualized_cvar_95': round(cvar_annual, 4),
+            'var_threshold_zeta': round(zeta * math.sqrt(252.0), 4)
+        }
+
+    def optimize_black_litterman(self, P=None, Q=None, delta=2.5, tau=0.05, market_weights=None):
+        """
+        Solves Black-Litterman Bayesian Asset Allocation blending CAPM equilibrium prior returns
+        with investor views using standard Mean-Variance Quadratic Utility optimization.
+        Args:
+            P: (k x N) Pick matrix linking views to assets (if None, uses default 2 views)
+            Q: (k,) Vector of view returns (if None, uses default [0.02, 0.03])
+            delta: risk aversion coefficient (default 2.5)
+            tau: scaling factor for prior covariance uncertainty (default 0.05)
+            market_weights: benchmark market portfolio weights (default [0.25, 0.25, 0.15, 0.10, 0.10, 0.15])
+        """
+        cov = self.cov_matrix.values
+        N = self.num_assets
+
+        if market_weights is None:
+            w_mkt = np.array([0.25, 0.25, 0.15, 0.10, 0.10, 0.15])
+        else:
+            w_mkt = np.array(market_weights)
+
+        # Implied Equilibrium Prior Returns: Pi = delta * Cov @ w_mkt
+        Pi = delta * np.dot(cov, w_mkt)
+
+        # Handle zero-views case (collapse to prior)
+        if P is None or len(P) == 0:
+            mu_BL = Pi
+            cov_BL = cov
+        else:
+            P = np.array(P)
+            Q = np.array(Q)
+
+            # Uncertainty Matrix: Omega = diag(P @ (tau * Cov) @ P^T) (He & Litterman specification)
+            Omega = np.diag(np.diag(P @ (tau * cov) @ P.T))
+
+            # Posterior Expected Returns & Covariance:
+            tau_cov_inv = np.linalg.inv(tau * cov)
+            omega_inv = np.linalg.inv(Omega)
+
+            M = np.linalg.inv(tau_cov_inv + P.T @ omega_inv @ P)
+            mu_BL = M @ (tau_cov_inv @ Pi + P.T @ omega_inv @ Q)
+            cov_BL = cov + M
+
+        # Canonical Black-Litterman Quadratic Utility Optimization:
+        # min_{w}  0.5 * delta * w^T Cov_BL w - w^T mu_BL
+        # s.t.  sum(w) = 1,  w_i >= 0
+        def bl_utility_obj(w):
+            return 0.5 * delta * np.dot(w.T, np.dot(cov_BL, w)) - np.dot(w, mu_BL)
+
+        constraints = ({'type': 'eq', 'fun': lambda w: np.sum(w) - 1.0})
+        bounds = tuple((0.0, 1.0) for _ in range(self.num_assets))
+
+        res = minimize(bl_utility_obj, w_mkt, method='SLSQP', bounds=bounds, constraints=constraints)
+        weights = res.x
+
+        p_ret = float(np.dot(weights, mu_BL))
+        p_vol = float(np.sqrt(np.dot(weights.T, np.dot(cov, weights))))
+        sharpe = (p_ret - self.rf) / p_vol if p_vol > 0 else 0.0
+
+        return {
+            'strategy': 'Black-Litterman Bayesian Allocation',
+            'weights': {t: round(float(w), 4) for t, w in zip(self.tickers, weights)},
+            'expected_annual_return': round(p_ret, 4),
+            'annual_volatility': round(p_vol, 4),
+            'sharpe_ratio': round(sharpe, 4),
+            'prior_equilibrium_returns': {t: round(float(r), 4) for t, r in zip(self.tickers, Pi)},
+            'posterior_bl_returns': {t: round(float(r), 4) for t, r in zip(self.tickers, mu_BL)},
+            'benchmark_weights': {t: round(float(w), 4) for t, w in zip(self.tickers, w_mkt)}
+        }
+
     def optimize_risk_parity(self):
         """
-        Solves Equal Risk Contribution (Risk Parity) allocation.
+        Solves Equal Risk Contribution (Risk Parity) allocation via SQP optimization.
         """
         cov = self.cov_matrix.values
         target = np.full(self.num_assets, 1.0 / self.num_assets)
@@ -99,88 +229,9 @@ class MultiStrategyPortfolioOptimizer:
             'sharpe_ratio': round(sharpe, 4)
         }
 
-    def optimize_max_sortino(self):
-        """
-        Solves Post-Modern Portfolio Theory (Max Sortino Ratio) penalizing downside volatility only.
-        """
-        daily_rets = self.daily_returns.values
-        rf_daily = self.rf / 252.0
-
-        def neg_sortino(weights):
-            p_daily = np.dot(daily_rets, weights)
-            downside = p_daily[p_daily < rf_daily] - rf_daily
-            downside_dev = np.sqrt(np.mean(downside ** 2)) * np.sqrt(252.0)
-            if downside_dev == 0:
-                return -100.0
-            p_ret_ann = np.mean(p_daily) * 252.0
-            sortino = (p_ret_ann - self.rf) / downside_dev
-            return -sortino
-
-        constraints = ({'type': 'eq', 'fun': lambda w: np.sum(w) - 1.0})
-        bounds = tuple((0.0, 1.0) for _ in range(self.num_assets))
-        w0 = np.ones(self.num_assets) / self.num_assets
-
-        res = minimize(neg_sortino, w0, method='SLSQP', bounds=bounds, constraints=constraints)
-        weights = res.x
-
-        cov = self.cov_matrix.values
-        mu = self.expected_returns.values
-        p_ret = float(np.dot(weights, mu))
-        p_vol = float(np.sqrt(np.dot(weights.T, np.dot(cov, weights))))
-
-        p_daily = np.dot(daily_rets, weights)
-        downside = p_daily[p_daily < rf_daily] - rf_daily
-        downside_dev = float(np.sqrt(np.mean(downside ** 2)) * np.sqrt(252.0))
-        sortino = (p_ret - self.rf) / downside_dev if downside_dev > 0 else 0.0
-
-        return {
-            'strategy': 'PMPT Max Sortino',
-            'weights': {t: round(float(w), 4) for t, w in zip(self.tickers, weights)},
-            'expected_annual_return': round(p_ret, 4),
-            'annual_volatility': round(p_vol, 4),
-            'sortino_ratio': round(sortino, 4)
-        }
-
-    def optimize_min_cvar(self, alpha=0.95):
-        """
-        Solves 95% Conditional Value at Risk (Expected Shortfall) minimization.
-        """
-        daily_rets = self.daily_returns.values
-
-        def cvar_objective(weights):
-            p_daily = np.dot(daily_rets, weights)
-            var_thresh = np.percentile(p_daily, (1.0 - alpha) * 100.0)
-            tail_losses = p_daily[p_daily <= var_thresh]
-            cvar = -np.mean(tail_losses) * np.sqrt(252.0)
-            return cvar
-
-        constraints = ({'type': 'eq', 'fun': lambda w: np.sum(w) - 1.0})
-        bounds = tuple((0.0, 1.0) for _ in range(self.num_assets))
-        w0 = np.ones(self.num_assets) / self.num_assets
-
-        res = minimize(cvar_objective, w0, method='SLSQP', bounds=bounds, constraints=constraints)
-        weights = res.x
-
-        cov = self.cov_matrix.values
-        mu = self.expected_returns.values
-        p_ret = float(np.dot(weights, mu))
-        p_vol = float(np.sqrt(np.dot(weights.T, np.dot(cov, weights))))
-
-        p_daily = np.dot(daily_rets, weights)
-        var_thresh = np.percentile(p_daily, (1.0 - alpha) * 100.0)
-        cvar_val = float(-np.mean(p_daily[p_daily <= var_thresh]) * np.sqrt(252.0))
-
-        return {
-            'strategy': 'Tail Risk Min CVaR (95% ES)',
-            'weights': {t: round(float(w), 4) for t, w in zip(self.tickers, weights)},
-            'expected_annual_return': round(p_ret, 4),
-            'annual_volatility': round(p_vol, 4),
-            'annualized_cvar_95': round(cvar_val, 4)
-        }
-
     def compute_discrete_allocation(self, weights_dict, total_capital=100000.0):
         """
-        Computes exact integer shares to purchase for a given cash portfolio.
+        Computes exact integer shares to purchase for a given cash portfolio budget.
         """
         latest_prices = self.prices.iloc[-1].to_dict()
         shares = {}

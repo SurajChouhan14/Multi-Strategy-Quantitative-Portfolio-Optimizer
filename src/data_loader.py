@@ -1,6 +1,7 @@
 """
-Quantitative Multi-Asset Price Data Ingestion Module.
-Ingests multi-asset price histories and computes returns, annualized expected returns, and Ledoit-Wolf covariance matrices.
+Quantitative Multi-Asset Historical Data Loader & Statistical Estimator.
+Ingests institutional daily price histories and estimates returns, annualized expected returns,
+and diagonal-target shrinkage covariance matrices.
 """
 
 import os
@@ -19,7 +20,8 @@ class PortfolioDataLoader:
 
     def load_price_data(self, tickers=None):
         """
-        Loads asset price histories and calculates daily log/pct returns, expected returns, and covariance.
+        Loads asset price histories from local deterministic CSV and computes daily returns,
+        annualized expected returns, and shrinkage covariance.
         """
         if not os.path.exists(self.price_path):
             raise FileNotFoundError(f"Asset price file not found at {self.price_path}")
@@ -32,7 +34,7 @@ class PortfolioDataLoader:
         expected_returns = daily_returns.mean() * 252.0
         sample_covariance = daily_returns.cov() * 252.0
 
-        # Ledoit-Wolf Shrinkage covariance estimation
+        # Shrinkage covariance estimation (delta=0.20 shrinkage toward diagonal variance target)
         n_obs, n_assets = daily_returns.shape
         prior = np.diag(np.diag(sample_covariance))
         shrinkage = 0.20
